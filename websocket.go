@@ -148,20 +148,31 @@ func (api *SlackWS) SendMessage(msg *OutgoingMessage) error {
 }
 
 func (api *SlackWS) HandleIncomingEvents(ch chan SlackEvent) {
+	eofCount := 0
+	log.Println("entering loop")
+	defer close(ch)
 	for {
 		event := json.RawMessage{}
 		if err := websocket.JSON.Receive(api.conn, &event); err == io.EOF {
+			log.Println("got EOF!")
 			//log.Println("Derpi derp, should we destroy conn and start over?")
 			//if err = api.StartRTM(); err != nil {
 			//	log.Fatal(err)
 			//}
 			// should we reconnect here?
-			if !api.conn.IsClientConn() {
+			if !api.conn.IsClientConn() || eofCount > 10 {
+				log.Println("reconnecting")
+				eofCount = 0
 				api.conn, err = websocket.Dial(api.info.Url, api.config.protocol, api.config.origin)
 				if err != nil {
 					log.Panic(err)
 				}
+			} else {
+				log.Println("but client was connected...", api.conn, eofCount)
+				eofCount++
+				log.Println("eofcount", eofCount)
 			}
+			goto SLEEP
 			// XXX: check for timeout and implement exponential backoff
 		} else if err != nil {
 			log.Panic(err)
@@ -170,10 +181,12 @@ func (api *SlackWS) HandleIncomingEvents(ch chan SlackEvent) {
 			log.Println("Event Empty. WTF?")
 		} else {
 			if api.debug {
-				log.Println(string(event[:]))
+				log.Println("event", string(event[:]))
 			}
+			eofCount = 0
 			api.handleEvent(ch, event)
 		}
+	SLEEP:
 		time.Sleep(time.Millisecond * 500)
 	}
 }
@@ -182,14 +195,14 @@ func (api *SlackWS) handleEvent(ch chan SlackEvent, event json.RawMessage) {
 	em := Event{}
 	err := json.Unmarshal(event, &em)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal("couldn't parse", string(event), err)
 	}
 	switch em.Type {
 	case "":
 		// try ok
 		ack := AckMessage{}
 		if err = json.Unmarshal(event, &ack); err != nil {
-			log.Fatal(err)
+			log.Fatal("couldn't parse", string(event), err)
 		}
 
 		if ack.Ok {
@@ -206,7 +219,7 @@ func (api *SlackWS) handleEvent(ch chan SlackEvent, event json.RawMessage) {
 	case "pong":
 		pong := Pong{}
 		if err = json.Unmarshal(event, &pong); err != nil {
-			log.Fatal(err)
+			log.Fatal("couldn't parse", string(event), err)
 		}
 		api.mutex.Lock()
 		latency := time.Since(api.pings[pong.ReplyTo])
